@@ -1,6 +1,6 @@
 # Release and secrets
 
-OpenScreen's release machinery lives in `.github/workflows/prerelease.yml`, `promote.yml`, and `build.yml`; its credentials are repository secrets and variables consumed by those workflows and the downstream package and Discord automations. This page is the operational reference for cutting releases and maintaining those credentials.
+OpenScreen's release machinery lives in `.github/workflows/prerelease.yml`, `promote.yml`, and `build.yml`; its credentials are secrets of the `release` environment (see [Release environment](#release-environment)), plus repository secrets and variables for the Discord automations. This page is the operational reference for cutting releases and maintaining those credentials.
 
 ## Release flow
 
@@ -93,7 +93,7 @@ The fallback skips milestone migration/closure, release-branch automation, main 
 For a `v1.4.2` while `v1.5.0` is in flight:
 
 1. Branch `release/1.4.x` from the `v1.4.0` (or `v1.4.1`) tag.
-2. Cherry-pick the fix commits.
+2. Cherry-pick the fix commits. If the base tag predates the `environment: release` lines (see [Release environment](#release-environment)), add `environment: release` by hand to each job of that branch's workflows that reads a release secret: the original commit touches workflows an old line may not have, so it does not cherry-pick cleanly.
 3. Push the branch, then `git tag v1.4.2-rc.1` on the branch tip.
 4. `git push origin release/1.4.x v1.4.2-rc.1` — `build.yml` works from any branch.
 
@@ -105,6 +105,25 @@ No new workflow code is needed; the tag-pushed trigger is branch-agnostic.
 - **At RC cut**: `prerelease.yml` snapshots `Next Release` into a versioned `vX.Y.Z` milestone. The rolling milestone is left open and empty for new work.
 - **Between RC cut and promote**: any PR that merges during the RC window lands back in the empty `Next Release`. It is **not** retroactively added to `vX.Y.Z`. If a critical fix lands, cut `vX.Y.Z-rc.(N+1)` instead of promoting.
 - **At promote**: `promote.yml` closes the `vX.Y.Z` milestone and uses its closed issues to populate the Discord release announcement.
+
+## Release environment
+
+Write access merges code; it does not reach the release credentials or run the release automation. Three settings hold that line, and none of them lives in a file a pull request can change:
+
+- **The `release` environment** holds every release credential: `OPENSCREEN_RELEASE_TOKEN`, the six Apple signing secrets, the four Microsoft Store secrets, `WINGET_ACC_TOKEN`, `HOMEBREW_TAP_TOKEN` and `AUR_SSH_PRIVATE_KEY`. It requires the repository owner's approval before any job that names it starts. A repository secret would not do: it reaches any workflow pushed to any branch by anyone with write access, and `OPENSCREEN_RELEASE_TOKEN` acts as the owner, who bypasses the main ruleset.
+- **The `release-tags` ruleset** stops anyone but the owner and `github-actions[bot]` from moving or deleting a `v*` tag. Creating one stays open, because `promote.yml` pushes the stable tag with `GITHUB_TOKEN` (see above) and the GitHub Actions app cannot be a bypass actor of a repository ruleset. A stray tag publishes nothing: the build it starts still waits for approval.
+- **The `release-branches` ruleset** reserves `release/*` to the owner, so the frozen branch only moves through the owner or the token.
+
+Each job that reads a release credential declares `environment: release`: `prerelease`, `promote`, `build-macos`, `publish-release` and `publish-msstore` in `build.yml`, `publish-msstore.yml`, `publish-winget.yml`, `aur-publish.yml`, `update-homebrew-cask.yml` and `announce-release.yml`. A new job that needs one must declare it too, or it reads an empty value. Set or rotate a release secret with `gh secret set <NAME> --env release --repo getopenscreen/openscreen`, which prompts for the value. Variables (`AUR_PACKAGE_NAME`, `HOMEBREW_TAP_*`, the Discord channel IDs) stay repository variables: job-level `if:` conditions read them before the environment loads.
+
+**What it does not stop.** GitHub's write role can still create, edit and attach assets to a release by hand, and GitHub has no role that merges pull requests without also allowing that. Such a release is unsigned and starts no package publication without approval, but it is still a public release.
+
+**Immutable releases are on** (since 2026-11-07, for releases published from then on). Once published, a release's assets and tag are frozen; its title, notes, pre-release and latest flags stay editable. The pipeline is unaffected, because `gh release create` attaches the assets to a draft and publishes last. What it gives up: `publish-release`'s `--clobber` re-upload only works on a draft now, so a published release with a bad asset is fixed by a new version, and a deleted release's tag name can never be reused.
+
+**Moving the credentials** is only done once both of these hold, in this order:
+
+1. Every release branch still in use carries the `environment: release` lines. A tag builds with the `build.yml` it points at, so a branch cut before them, or a backport branch cut later from an older tag, needs the change before its next tag. An existing tag never acquires it, so a tag older than the move is not rebuilt: a broken release is fixed by a new version, as immutable releases require anyway. Without it, its builds read empty values and the macOS job falls back to an ad-hoc signature.
+2. Each secret is set in the environment, then its repository copy is deleted with `gh secret delete <NAME> --repo getopenscreen/openscreen`. An environment secret does not remove the repository secret of the same name, and the repository copy stays readable from any branch until it is deleted.
 
 ## Required release credential
 
@@ -121,10 +140,10 @@ Grant the token access only to the OpenScreen repository with:
 - Workflows: read and write, because the pushed release branch contains `.github/workflows/`.
 - Metadata: read-only.
 
-Create a fine-grained token from GitHub settings, set a finite expiry, and save it as the repository secret `OPENSCREEN_RELEASE_TOKEN`:
+Create a fine-grained token from GitHub settings, set a finite expiry, and save it as the `release` environment secret `OPENSCREEN_RELEASE_TOKEN`:
 
 ```bash
-gh secret set OPENSCREEN_RELEASE_TOKEN --body "<token>" --repo getopenscreen/openscreen
+gh secret set OPENSCREEN_RELEASE_TOKEN --env release --repo getopenscreen/openscreen
 ```
 
 Rotate it by creating the replacement with the same repository and scopes, updating the secret, verifying a non-destructive workflow/API operation, then revoking the old token. Do not revoke the previous token until the replacement is installed.
